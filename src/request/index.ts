@@ -1,7 +1,8 @@
-import type { Logger } from 'homebridge';
-import { createCipheriv, createDecipheriv, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { URL } from 'node:url';
+import type { Logger } from 'homebridge';
 import type { ZiroomDeviceInfo } from '../types';
+import { decodeDes, encodeDes } from './crypto';
 import { login } from './login';
 
 export interface ZiroomRequestOptions {
@@ -9,16 +10,33 @@ export interface ZiroomRequestOptions {
   account?: string;
   password?: string;
   hid?: string;
+  requestTimeout?: number;
+}
+
+interface ZiroomResponse<T> {
+  code: string;
+  data: T;
+  message?: string;
+}
+
+interface ZiroomDeviceListResponse {
+  deviceData?: {
+    deviceList?: Array<{
+      deviceList?: ZiroomDeviceInfo[];
+    }>;
+  };
 }
 
 export class ZiroomRequest {
-  private static readonly SECRET_KEY = 'vpRZ1kmU';
-  private static readonly IV = 'EbpU4WtY';
+  private static readonly MAX_CONCURRENT_REQUESTS = 3;
 
   private hid = '';
 
   private token = '';
   private tokenExpiredAt = Number.POSITIVE_INFINITY;
+  private loginPromise: Promise<void> | null = null;
+  private activeRequests = 0;
+  private readonly requestWaiters: Array<() => void> = [];
 
   constructor(
     public readonly log: Logger,
@@ -26,22 +44,6 @@ export class ZiroomRequest {
   ) {
     this.hid = options.hid ?? '';
     this.token = options.token ?? '';
-  }
-
-  private encodeDes(plainText: string): string {
-    const cipher = createCipheriv('des-cbc', ZiroomRequest.SECRET_KEY, ZiroomRequest.IV);
-    cipher.setAutoPadding(true);
-    let encrypted = cipher.update(plainText, 'utf8', 'hex');
-    encrypted += cipher.final('hex');
-    return encrypted;
-  }
-
-  private decodeDes(encrypted: string): string {
-    const decipher = createDecipheriv('des-cbc', ZiroomRequest.SECRET_KEY, ZiroomRequest.IV);
-    decipher.setAutoPadding(true);
-    let decrypted = decipher.update(encrypted, 'hex', 'utf8');
-    decrypted += decipher.final('utf8');
-    return decrypted;
   }
 
   private async getToken() {
@@ -53,13 +55,24 @@ export class ZiroomRequest {
   }
 
   private async login() {
-    if (this.options.account && this.options.password) {
-      const token = await login(this.options.account, this.options.password);
-      if (token) {
+    const { account, password } = this.options;
+    if (!account || !password) {
+      throw new Error('自如 Token 已失效，且未配置账号和密码用于自动登录');
+    }
+
+    if (!this.loginPromise) {
+      this.loginPromise = (async () => {
+        const token = await login(account, password);
+        if (!token) {
+          throw new Error('自如登录成功但未返回 Token');
+        }
         this.token = token;
         this.tokenExpiredAt = Date.now() + 1000 * 60 * 60 * 24 * 3;
-      }
+      })().finally(() => {
+        this.loginPromise = null;
+      });
     }
+    await this.loginPromise;
   }
 
   private async createHeaders(timestamp: number) {
@@ -96,29 +109,45 @@ export class ZiroomRequest {
     return this.getJwtPayload()?.uid;
   }
 
+  private async getUid() {
+    await this.getToken();
+    const uid = this.uid;
+    if (!uid) {
+      throw new Error('无法从自如 Token 中解析 uid');
+    }
+    return uid;
+  }
+
   async getHid() {
     if (this.hid) {
       return this.hid;
     }
     const resp = await this.request<{ hid: string }[]>('/homeapi/v10/home/queryHomeList', {
-      uid: this.uid,
+      uid: await this.getUid(),
     });
     this.hid = resp?.[0]?.hid ?? '';
+    if (!this.hid) {
+      throw new Error('自如账号下没有可用的 HID');
+    }
     return this.hid;
   }
 
-  public async request<T = any>(path: string, data: Record<string, any>): Promise<T> {
+  public async request<T = unknown>(path: string, data: Record<string, unknown>, authRetryCount = 0): Promise<T> {
     const timestamp = Date.now();
-    const body = this.encodeDes(JSON.stringify(data));
+    const body = encodeDes(JSON.stringify(data));
     const url = new URL(path, 'https://ztoread.ziroom.com/');
     const headers = await this.createHeaders(timestamp);
+    const timeout = Math.max(1000, this.options.requestTimeout ?? 15_000);
 
     try {
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers,
-        body,
-      });
+      const resp = await this.withRequestSlot(() =>
+        fetch(url, {
+          method: 'POST',
+          headers,
+          body,
+          signal: AbortSignal.timeout(timeout),
+        }),
+      );
 
       if (!resp.ok) {
         const error = new Error(`请求失败: ${resp.status} ${resp.statusText}`);
@@ -127,31 +156,24 @@ export class ZiroomRequest {
       }
 
       const text = await resp.text();
-      const dataString = this.decodeDes(text);
+      const dataString = decodeDes(text);
 
-      const respData = JSON.parse(dataString);
+      const respData = JSON.parse(dataString) as ZiroomResponse<T>;
       if (respData.code === '200') {
-        return respData.data as T;
+        return respData.data;
       }
       if (respData.code === '40005') {
-        let retryCount = 0;
         const maxRetries = 3;
-
-        while (retryCount < maxRetries) {
-          try {
-            await this.login();
-            return this.request(path, data);
-          } catch (error) {
-            retryCount++;
-            if (retryCount >= maxRetries) {
-              this.log.error(`登录重试${maxRetries}次失败`);
-              throw error;
-            }
-            this.log.warn(`登录失败，正在进行第${retryCount}次重试`);
-          }
+        if (authRetryCount >= maxRetries) {
+          throw new Error(`自如登录重试 ${maxRetries} 次后仍然失败`);
         }
+        this.token = '';
+        this.tokenExpiredAt = 0;
+        this.log.warn(`Token 已失效，正在进行第 ${authRetryCount + 1} 次重新登录`);
+        await this.login();
+        return this.request(path, data, authRetryCount + 1);
       }
-      throw new Error(`[${path}] ${respData.code}: ${respData.message}`);
+      throw new Error(`[${path}] ${respData.code}: ${respData.message ?? '未知错误'}`);
     } catch (error) {
       if (error instanceof SyntaxError) {
         const err = new Error(`响应解析失败: ${error.message}`);
@@ -163,17 +185,33 @@ export class ZiroomRequest {
     }
   }
 
+  private async withRequestSlot<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.activeRequests >= ZiroomRequest.MAX_CONCURRENT_REQUESTS) {
+      await new Promise<void>((resolve) => this.requestWaiters.push(resolve));
+    }
+    this.activeRequests += 1;
+    try {
+      return await operation();
+    } finally {
+      this.activeRequests -= 1;
+      this.requestWaiters.shift()?.();
+    }
+  }
+
   public async getDeviceList() {
     const hid = await this.getHid();
-    const resp = await this.request('/homeapi/v4/homePageDevice/queryAreaDeviceListNew', {
-      uid: this.uid,
+    const resp = await this.request<ZiroomDeviceListResponse>('/homeapi/v4/homePageDevice/queryAreaDeviceListNew', {
+      uid: await this.getUid(),
       hid,
       type: 0,
       version: 25,
     });
+    if (!Array.isArray(resp.deviceData?.deviceList)) {
+      throw new Error('自如设备列表响应结构无效');
+    }
     const devices = new Map<string, ZiroomDeviceInfo>();
     for (const category of resp.deviceData.deviceList) {
-      for (const device of category.deviceList) {
+      for (const device of category.deviceList ?? []) {
         devices.set(device.devUuid, device);
       }
     }
@@ -183,7 +221,7 @@ export class ZiroomRequest {
   public async getDeviceDetail(devUuid: string) {
     const hid = await this.getHid();
     const resp = await this.request<ZiroomDeviceInfo>('/homeapi/v3/device/deviceDetailPage', {
-      uid: this.uid,
+      uid: await this.getUid(),
       hid,
       version: 19,
       devUuid,
@@ -194,7 +232,7 @@ export class ZiroomRequest {
   public async setDeviceState(devUuid: string, prodOperCode: string, param: string) {
     const hid = await this.getHid();
     const resp = await this.request('/homeapi/v2/device/controlDeviceByOperCode', {
-      uid: this.uid,
+      uid: await this.getUid(),
       hid,
       devUuid,
       prodOperCode,

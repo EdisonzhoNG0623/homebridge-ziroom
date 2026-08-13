@@ -1,8 +1,14 @@
 import type { API, Characteristic, DynamicPlatformPlugin, Logger, PlatformConfig, Service } from 'homebridge';
-import { Conditioner02, Light03, Light04 } from './accessories';
+import { Conditioner02, Curtain01, Light03, Light04 } from './accessories';
+import type { BaseAccessory } from './accessories/base';
 import { ZiroomRequest, type ZiroomRequestOptions } from './request';
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings';
-import type { ZiroomDeviceInfo, ZiroomPlatformAccessory, ZiroomPlatformAccessoryContext } from './types';
+import type {
+  ZiroomDeviceInfo,
+  ZiroomPlatformAccessory,
+  ZiroomPlatformAccessoryContext,
+  ZiroomPlatformConfig,
+} from './types';
 
 export class ZiroomHomebridgePlatform implements DynamicPlatformPlugin {
   public readonly Service: typeof Service = this.api.hap.Service;
@@ -12,27 +18,61 @@ export class ZiroomHomebridgePlatform implements DynamicPlatformPlugin {
   public readonly accessories: ZiroomPlatformAccessory[] = [];
 
   public readonly request: ZiroomRequest;
+  public readonly options: ZiroomPlatformConfig;
+  private readonly accessoryHandlers = new Map<string, BaseAccessory>();
 
   constructor(
     public readonly log: Logger,
     public readonly config: PlatformConfig,
     public readonly api: API,
   ) {
-    this.request = new ZiroomRequest(this.log, this.config as ZiroomRequestOptions);
+    this.options = this.config as ZiroomPlatformConfig;
+    this.request = new ZiroomRequest(this.log, this.options as ZiroomRequestOptions);
     this.api.on('didFinishLaunching', () => {
-      this.discoverDevices();
+      void this.discoverDevices();
+    });
+    this.api.on('shutdown', () => {
+      this.accessoryHandlers.forEach((handler) => handler.destroy());
     });
   }
 
   configureAccessory(accessory: ZiroomPlatformAccessory) {
     this.log.info('从缓存中获取设备', accessory.displayName);
     this.accessories.push(accessory);
+    const device = accessory.context.deviceInfo;
+    if (!device) {
+      this.log.warn(`缓存设备缺少设备信息，等待重新发现: ${accessory.displayName}`);
+      return;
+    }
+    const AccessoryClass = this.getAccessoryClass(device);
+    if (AccessoryClass) {
+      this.accessoryHandlers.set(accessory.UUID, new AccessoryClass(this, accessory));
+    }
   }
 
   async discoverDevices() {
-    const devices = await this.request.getDeviceList();
-    for (const device of devices) {
-      this.handleAccessory(device);
+    try {
+      const devices = await this.request.getDeviceList();
+      const discoveredUuids = new Set<string>();
+      for (const device of devices) {
+        discoveredUuids.add(this.api.hap.uuid.generate(device.devUuid));
+        this.handleAccessory(device);
+      }
+
+      const staleAccessories = this.accessories.filter((accessory) => !discoveredUuids.has(accessory.UUID));
+      if (staleAccessories.length > 0) {
+        for (const accessory of staleAccessories) {
+          this.accessoryHandlers.get(accessory.UUID)?.destroy();
+          this.accessoryHandlers.delete(accessory.UUID);
+        }
+        this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, staleAccessories);
+        const staleUuids = new Set(staleAccessories.map((accessory) => accessory.UUID));
+        const activeAccessories = this.accessories.filter((accessory) => !staleUuids.has(accessory.UUID));
+        this.accessories.splice(0, this.accessories.length, ...activeAccessories);
+        this.log.info(`移除 ${staleAccessories.length} 个已不存在的缓存设备`);
+      }
+    } catch (error) {
+      this.log.error('发现自如设备失败', error);
     }
   }
 
@@ -47,11 +87,22 @@ export class ZiroomHomebridgePlatform implements DynamicPlatformPlugin {
 
     if (existingAccessory) {
       this.log.info('从缓存中获取设备', existingAccessory.displayName);
-      existingAccessory.context = {
-        deviceInfo: device,
+      const existingHandler = this.accessoryHandlers.get(uuid);
+      const sameModel =
+        existingAccessory.context.deviceInfo.modelCode.trim().toLowerCase() === device.modelCode.trim().toLowerCase();
+      existingAccessory.context.deviceInfo = {
+        ...existingAccessory.context.deviceInfo,
+        ...device,
+        devStateMap: { ...existingAccessory.context.deviceInfo.devStateMap, ...device.devStateMap },
+        groupInfoMap: { ...existingAccessory.context.deviceInfo.groupInfoMap, ...device.groupInfoMap },
       };
       this.api.updatePlatformAccessories([existingAccessory]);
-      new AccessoryClass(this, existingAccessory);
+      if (existingHandler && sameModel) {
+        existingHandler.updateDeviceInfo(existingAccessory.context.deviceInfo);
+      } else {
+        existingHandler?.destroy();
+        this.accessoryHandlers.set(uuid, new AccessoryClass(this, existingAccessory));
+      }
     } else {
       const displayName = this.getDeviceName(device);
       this.log.info('添加新设备', displayName);
@@ -59,20 +110,23 @@ export class ZiroomHomebridgePlatform implements DynamicPlatformPlugin {
       accessory.context = {
         deviceInfo: device,
       };
-      new AccessoryClass(this, accessory);
+      this.accessoryHandlers.set(uuid, new AccessoryClass(this, accessory));
       this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+      this.accessories.push(accessory);
     }
     return device.devUuid;
   }
 
   private getAccessoryClass(device: ZiroomDeviceInfo) {
-    switch (device.modelCode) {
+    switch (device.modelCode.trim().toLowerCase()) {
       case 'light03':
         return Light03;
       case 'light04':
         return Light04;
       case 'conditioner02':
         return Conditioner02;
+      case 'curtain01':
+        return Curtain01;
       default:
         return null;
     }

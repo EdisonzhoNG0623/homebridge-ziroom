@@ -14,7 +14,7 @@
   "main": "./dist/index.cjs",
   "types": "./dist/index.d.ts",
   "engines": {
-    "node": "^18.20.4 || ^20.18.0 || ^22.10.0",
+    "node": "^18.20.4 || ^20.18.0 || ^22.10.0 || ^24.0.0",
     "homebridge": "^1.8.0 || ^2.0.0-beta.0"
   },
   "repository": {
@@ -31,26 +31,27 @@
     "自如"
   ],
   "files": [
-    "dist"
+    "dist",
+    "config.schema.json"
   ],
   "scripts": {
     "build": "rslib build",
+    "lint": "biome check src test",
+    "test": "vitest run",
+    "check": "npm run lint && npm test && npm run build",
     "dev": "nodemon",
     "prerelease": "npm run build",
     "release": "changeset publish"
   },
-  "dependencies": {
-    "@playwright/browser-webkit": "^1.52.0",
-    "playwright": "^1.52.0"
-  },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
-    "@changesets/cli": "^2.29.2",
+    "@changesets/cli": "^2.31.1",
     "@rslib/core": "^0.6.8",
     "@types/node": "^22.8.1",
     "homebridge": "^1.9.0",
-    "homebridge-config-ui-x": "^4.73.0",
     "nodemon": "^3.1.10",
-    "typescript": "^5.8.3"
+    "playwright": "^1.62.1",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.7"
   }
 }

@@ -1,4 +1,24 @@
-import type { PlatformAccessory } from 'homebridge';
+import type { PlatformAccessory, PlatformConfig } from 'homebridge';
+
+export interface ZiroomDeviceConfig {
+  /** Reverse the curtain position reported by Ziroom. */
+  reversePosition?: boolean;
+  /** Override a logical capability name with a groupInfoMap key. */
+  propertyMap?: Record<string, string>;
+}
+
+export interface ZiroomPlatformConfig extends PlatformConfig {
+  token?: string;
+  account?: string;
+  password?: string;
+  hid?: string;
+  /** Device refresh interval in seconds. Set to 0 to disable polling. */
+  pollInterval?: number;
+  /** Ziroom API timeout in milliseconds. */
+  requestTimeout?: number;
+  /** Per-device compatibility overrides, keyed by devUuid. */
+  devConfig?: Record<string, ZiroomDeviceConfig>;
+}
 
 export type ZiroomPlatformAccessory = PlatformAccessory<ZiroomPlatformAccessoryContext>;
 

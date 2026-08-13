@@ -4,38 +4,87 @@
   "singular": true,
   "schema": {
     "type": "object",
+    "required": ["name"],
     "properties": {
       "name": {
-        "title": "Name",
+        "title": "名称",
         "type": "string",
-        "required": true,
-        "default": "homebridge-plugin-ziroom",
-        "description": "The name of the plugin instance."
+        "default": "Ziroom",
+        "description": "Homebridge 中显示的平台名称。"
       },
       "account": {
-        "title": "Account",
+        "title": "自如账号",
         "type": "string",
-        "required": false,
-        "description": "Your Ziroom account."
+        "description": "可选。与密码同时配置后可自动刷新失效的 Token。"
       },
       "password": {
-        "title": "Password",
+        "title": "自如密码",
         "type": "string",
-        "required": false,
-        "description": "Your Ziroom password."
+        "description": "可选。仅用于自动登录，请注意保护 Homebridge 配置文件。"
       },
       "token": {
         "title": "Token",
         "type": "string",
-        "required": false,
-        "description": "Your Ziroom token."
+        "description": "自如 App 登录 Token。也可以改用账号和密码自动登录。"
       },
       "hid": {
         "title": "HID",
         "type": "string",
-        "required": false,
-        "description": "Your Ziroom hid."
+        "description": "可选。留空时使用账号下的第一个自如之家。"
+      },
+      "pollInterval": {
+        "title": "状态刷新间隔（秒）",
+        "type": "integer",
+        "default": 30,
+        "minimum": 0,
+        "maximum": 3600,
+        "description": "同步自如 App/遥控器产生的外部状态变化；0 表示关闭轮询。"
+      },
+      "requestTimeout": {
+        "title": "API 超时（毫秒）",
+        "type": "integer",
+        "default": 15000,
+        "minimum": 1000,
+        "maximum": 120000
+      },
+      "devConfig": {
+        "title": "设备兼容配置",
+        "type": "object",
+        "description": "按 devUuid 配置窗帘方向或覆盖特殊设备的属性组名称。",
+        "additionalProperties": {
+          "type": "object",
+          "properties": {
+            "reversePosition": {
+              "title": "反转窗帘位置",
+              "type": "boolean",
+              "default": false
+            },
+            "propertyMap": {
+              "title": "属性组映射",
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          }
+        }
       }
     }
-  }
+  },
+  "layout": [
+    "name",
+    {
+      "key": "account",
+      "type": "string"
+    },
+    {
+      "key": "password",
+      "type": "string"
+    },
+    "token",
+    "hid",
+    "pollInterval",
+    "requestTimeout",
+    "devConfig"
+  ]
 }

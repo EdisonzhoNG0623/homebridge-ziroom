@@ -1,11 +1,23 @@
 import type { Service } from 'homebridge';
 import type { ZiroomHomebridgePlatform } from '../platform';
-import type { ZiroomDevElementInfo, ZiroomDeviceInfo, ZiroomPlatformAccessory } from '../types';
+import type {
+  ZiroomDevElementInfo,
+  ZiroomDeviceConfig,
+  ZiroomDeviceInfo,
+  ZiroomGroupInfo,
+  ZiroomPlatformAccessory,
+} from '../types';
+
+const SERVICE_COMMUNICATION_FAILURE = -70402;
 
 export abstract class BaseAccessory {
   public services: Record<string, Service> = {};
 
   private getDeviceDetailPromise: Promise<ZiroomDeviceInfo> | null = null;
+  private writeQueue: Promise<void> = Promise.resolve();
+  private pollTimer?: NodeJS.Timeout;
+  private initialized = false;
+  private destroyed = false;
 
   constructor(
     public readonly platform: ZiroomHomebridgePlatform,
@@ -19,13 +31,14 @@ export abstract class BaseAccessory {
   abstract onDeviceInfoChange(deviceInfo: ZiroomDeviceInfo): void;
 
   private async initializeAccessory() {
+    let deviceInfo: ZiroomDeviceInfo | undefined;
     try {
-      const deviceInfo = await this.loadDeviceInfo();
+      deviceInfo = await this.loadDeviceInfo();
       const infoService = this.accessory.getService(this.platform.Service.AccessoryInformation);
 
       const accessoryInformationMap = {
-        Manufacturer: deviceInfo.brandName,
-        Model: deviceInfo.modelName,
+        Manufacturer: this.validAccessoryInformation(deviceInfo.brandName, 'Ziroom'),
+        Model: this.validAccessoryInformation(deviceInfo.modelName, deviceInfo.modelCode),
         Name: deviceInfo.prodTypeName,
         SerialNumber: deviceInfo.prodTypeId,
       } as const;
@@ -39,7 +52,16 @@ export abstract class BaseAccessory {
     } catch (error) {
       this.platform.log.error(`设备初始化失败: ${this.accessory.displayName}`, error);
     }
-    this.init();
+    try {
+      this.init();
+      this.initialized = true;
+      if (deviceInfo) {
+        this.onDeviceInfoChange(deviceInfo);
+      }
+    } catch (error) {
+      this.platform.log.error(`注册设备服务失败: ${this.accessory.displayName}`, error);
+    }
+    this.schedulePoll();
   }
 
   private async getDeviceDetail() {
@@ -51,15 +73,55 @@ export abstract class BaseAccessory {
     return this.getDeviceDetailPromise;
   }
 
-  private async loadDeviceInfo() {
+  protected async loadDeviceInfo() {
     const deviceInfo = await this.getDeviceDetail();
     if (!deviceInfo) {
       throw new Error(`无法获取设备详情: ${this.deviceInfo.devUuid}`);
     }
     const newDeviceInfo = { ...this.deviceInfo, ...deviceInfo };
     this.accessory.context.deviceInfo = newDeviceInfo;
-    this.onDeviceInfoChange(newDeviceInfo);
+    if (this.initialized) {
+      this.onDeviceInfoChange(newDeviceInfo);
+    }
     return newDeviceInfo;
+  }
+
+  private schedulePoll() {
+    const pollInterval = this.platform.options.pollInterval ?? 30;
+    if (this.destroyed || pollInterval <= 0) {
+      return;
+    }
+    this.pollTimer = setTimeout(async () => {
+      try {
+        await this.loadDeviceInfo();
+      } catch (error) {
+        this.platform.log.warn(`刷新设备状态失败: ${this.accessory.displayName}`, String(error));
+      } finally {
+        this.schedulePoll();
+      }
+    }, Math.max(10, pollInterval) * 1000);
+    this.pollTimer.unref();
+  }
+
+  public destroy() {
+    this.destroyed = true;
+    if (this.pollTimer) {
+      clearTimeout(this.pollTimer);
+    }
+  }
+
+  public updateDeviceInfo(deviceInfo: ZiroomDeviceInfo) {
+    const current = this.deviceInfo;
+    const mergedDeviceInfo = {
+      ...current,
+      ...deviceInfo,
+      devStateMap: { ...current.devStateMap, ...deviceInfo.devStateMap },
+      groupInfoMap: { ...current.groupInfoMap, ...deviceInfo.groupInfoMap },
+    };
+    this.accessory.context.deviceInfo = mergedDeviceInfo;
+    if (this.initialized) {
+      this.onDeviceInfoChange(mergedDeviceInfo);
+    }
   }
 
   protected setServices<T extends typeof Service>(key: string, service: T, name?: string): InstanceType<T> {
@@ -80,6 +142,14 @@ export abstract class BaseAccessory {
     return newService as InstanceType<T>;
   }
 
+  protected removeService(key: string) {
+    const existingService = this.accessory.getService(key);
+    if (existingService) {
+      this.accessory.removeService(existingService);
+    }
+    delete this.services[key];
+  }
+
   protected get Characteristic() {
     return this.platform.Characteristic;
   }
@@ -88,47 +158,75 @@ export abstract class BaseAccessory {
     return this.accessory.context.deviceInfo;
   }
 
-  protected getDevicePropsSync(prop: string) {
-    const element = this.deviceInfo.groupInfoMap[prop]?.devElementList?.[0];
+  protected get deviceConfig(): ZiroomDeviceConfig {
+    return this.platform.options.devConfig?.[this.deviceInfo.devUuid] ?? {};
+  }
+
+  protected resolveProperty(prop: string, aliases: readonly string[] = []) {
+    const configured = this.deviceConfig.propertyMap?.[prop];
+    const candidates = [configured, prop, ...aliases].filter((candidate): candidate is string => Boolean(candidate));
+    return candidates.find((candidate) => this.deviceInfo.groupInfoMap[candidate]);
+  }
+
+  protected getGroupInfo(prop: string, aliases: readonly string[] = []): ZiroomGroupInfo | undefined {
+    const resolved = this.resolveProperty(prop, aliases);
+    return resolved ? this.deviceInfo.groupInfoMap[resolved] : undefined;
+  }
+
+  protected hasDeviceProps(prop: string, aliases: readonly string[] = []) {
+    return Boolean(this.getGroupInfo(prop, aliases));
+  }
+
+  protected getDevicePropsSync(prop: string, aliases: readonly string[] = []) {
+    const element = this.getGroupInfo(prop, aliases)?.devElementList?.[0];
     return element ? this.deviceInfo.devStateMap[element.prodStateCode] : undefined;
   }
 
-  protected async getDeviceProps(prop: string) {
-    await this.loadDeviceInfo();
-    return this.getDevicePropsSync(prop);
+  protected async getDeviceProps(prop: string, aliases: readonly string[] = []) {
+    this.assertOnline();
+    return this.getDevicePropsSync(prop, aliases);
   }
 
-  protected async setDeviceProps(prop: string, value: string) {
-    const { groupInfoMap } = this.deviceInfo;
-    const groupInfo = groupInfoMap[prop];
+  private validAccessoryInformation(value: string | undefined, fallback: string) {
+    const normalized = value?.trim() ?? '';
+    return normalized.length > 1 ? normalized : fallback;
+  }
 
+  protected async setDeviceProps(prop: string, value: string, aliases: readonly string[] = []) {
+    const groupInfo = this.getGroupInfo(prop, aliases);
     if (!groupInfo) {
-      this.platform.log.error(`无法找到属性组: ${prop}`);
-      return;
+      throw new Error(`无法找到属性组: ${prop}`);
     }
-
-    switch (groupInfo.groupType) {
-      case 1: {
-        const element = groupInfo.devElementList.find((e) => e.value === value.toString());
-        if (!element) {
-          throw new Error(`无法找到元素: ${prop}`);
+    return this.enqueueWrite(async () => {
+      this.assertOnline();
+      switch (groupInfo.groupType) {
+        case 1: {
+          const element =
+            groupInfo.devElementList.find((item) => item.value === value.toString()) ??
+            (groupInfo.devElementList.length === 1 ? groupInfo.devElementList[0] : undefined);
+          if (!element) {
+            throw new Error(`无法找到元素: ${prop}=${value}`);
+          }
+          await this.setDeviceState(element, value.toString());
+          break;
         }
-        await this.setDeviceState(element, value.toString());
-        break;
-      }
-      case 2: {
-        const element = groupInfo.devElementList[0];
-        const { maxValue = Number.MAX_SAFE_INTEGER, minValue = Number.MIN_SAFE_INTEGER } = element;
-        if (Number(value) < minValue || Number(value) > maxValue) {
-          throw new Error(`值超出范围: ${prop}`);
+        case 2: {
+          const element = groupInfo.devElementList[0];
+          if (!element) {
+            throw new Error(`属性组没有可用元素: ${prop}`);
+          }
+          const numericValue = Number(value);
+          const { maxValue = Number.MAX_SAFE_INTEGER, minValue = Number.MIN_SAFE_INTEGER } = element;
+          if (!Number.isFinite(numericValue) || numericValue < minValue || numericValue > maxValue) {
+            throw new Error(`值超出范围: ${prop}=${value}`);
+          }
+          await this.setDeviceState(element, value.toString());
+          break;
         }
-        await this.setDeviceState(element, value.toString());
-        break;
+        default:
+          throw new Error(`不支持的组类型: ${prop} (${groupInfo.groupType})`);
       }
-      default: {
-        throw new Error(`不支持的组类型: ${prop}`);
-      }
-    }
+    });
   }
 
   protected async setDeviceState(element: ZiroomDevElementInfo, value: string) {
@@ -139,6 +237,29 @@ export abstract class BaseAccessory {
       await this.loadDeviceInfo();
     } catch (error) {
       this.platform.log.error('设置失败', this.accessory.displayName, element.elementName, value, error);
+      throw this.communicationError(error);
     }
+  }
+
+  protected communicationError(error?: unknown) {
+    if (error instanceof this.platform.api.hap.HapStatusError) {
+      return error;
+    }
+    return new this.platform.api.hap.HapStatusError(SERVICE_COMMUNICATION_FAILURE);
+  }
+
+  private assertOnline() {
+    if (this.deviceInfo.isOnline === 0) {
+      throw this.communicationError(new Error('设备离线'));
+    }
+  }
+
+  private enqueueWrite<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.writeQueue.then(operation, operation);
+    this.writeQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 }
