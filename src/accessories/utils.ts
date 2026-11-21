@@ -1,4 +1,9 @@
+import type { Service } from 'homebridge';
 import type { ZiroomDevElementInfo, ZiroomGroupInfo } from '../types';
+
+// homebridge 2.x (@homebridge/hap-nodejs) 将 BatteryService 改名为 Battery
+export const batteryService = (services: typeof Service) =>
+  (services as unknown as { Battery?: typeof Service.BatteryService }).Battery ?? services.BatteryService;
 
 export const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 

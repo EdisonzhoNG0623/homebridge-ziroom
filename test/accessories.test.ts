@@ -1,7 +1,13 @@
 import hap from 'hap-nodejs';
 import { describe, expect, it, vi } from 'vitest';
+import { Smokealarm01 } from '../src/accessories/alarms';
 import { Conditioner02 } from '../src/accessories/conditioner02';
 import { Curtain01 } from '../src/accessories/curtain01';
+import { Fullscreen } from '../src/accessories/fullscreen';
+import { Gateway01 } from '../src/accessories/gateway01';
+import { Lock01 } from '../src/accessories/lock01';
+import { Socket02 } from '../src/accessories/socket02';
+import { Toiletseat } from '../src/accessories/toiletseat';
 import type { ZiroomHomebridgePlatform } from '../src/platform';
 import type { ZiroomDeviceInfo, ZiroomGroupInfo, ZiroomPlatformAccessory } from '../src/types';
 
@@ -323,5 +329,186 @@ describe('Curtain01', () => {
     await secondService.getCharacteristic(Characteristic.HoldPosition).handleSetRequest(true);
     expect(second.mutableDevice.devStateMap.stop).toBe('1');
     secondCurtain.destroy();
+  });
+});
+
+describe('Lock01', () => {
+  const lockDevice = (lockState: string) =>
+    baseDevice({
+      modelCode: 'lock01',
+      devStateMap: { battery_state: '31', lock_state: lockState },
+      groupInfoMap: {},
+    });
+
+  it('reports lock and battery state without exposing write operations', async () => {
+    const { accessory, platform, request } = createHarness(lockDevice('14'));
+    const lock = new Lock01(platform, accessory);
+    const mechanism = await waitForService(accessory, Service.LockMechanism);
+    const battery = await waitForService(accessory, Service.BatteryService);
+
+    expect(await mechanism.getCharacteristic(Characteristic.LockCurrentState).handleGetRequest()).toBe(
+      Characteristic.LockCurrentState.SECURED,
+    );
+    expect(await battery.getCharacteristic(Characteristic.BatteryLevel).handleGetRequest()).toBe(31);
+
+    await mechanism
+      .getCharacteristic(Characteristic.LockTargetState)
+      .handleSetRequest(Characteristic.LockTargetState.UNSECURED);
+    expect(request.setDeviceState).not.toHaveBeenCalled();
+    lock.destroy();
+  });
+
+  it('maps unlatched and unknown states', async () => {
+    const { accessory, platform } = createHarness(lockDevice('12'));
+    const lock = new Lock01(platform, accessory);
+    const mechanism = await waitForService(accessory, Service.LockMechanism);
+    expect(await mechanism.getCharacteristic(Characteristic.LockCurrentState).handleGetRequest()).toBe(
+      Characteristic.LockCurrentState.UNSECURED,
+    );
+    lock.destroy();
+  });
+});
+
+describe('Socket02', () => {
+  it('toggles via set_on_off and reports in-use from power draw', async () => {
+    const device = baseDevice({
+      modelCode: 'socket02',
+      devStateMap: {
+        hongyanUSB_jiaoliu_switchstatus: '11',
+        hongyanUSB_powerstatus: '739.231',
+        hongyanUSB_zhiliu_switchstatus: '20',
+      },
+      groupInfoMap: {
+        set_on_off: enumGroup('set_on_off', 'hongyanUSB_jiaoliu_switchstatus', [
+          ['11', '全开'],
+          ['10', '全关'],
+        ]),
+      },
+    });
+    const { accessory, platform } = createHarness(device);
+    const socket = new Socket02(platform, accessory);
+    const outlet = await waitForService(accessory, Service.Outlet);
+
+    expect(await outlet.getCharacteristic(Characteristic.On).handleGetRequest()).toBe(true);
+    expect(await outlet.getCharacteristic(Characteristic.OutletInUse).handleGetRequest()).toBe(true);
+
+    await outlet.getCharacteristic(Characteristic.On).handleSetRequest(false);
+    expect(await outlet.getCharacteristic(Characteristic.On).handleGetRequest()).toBe(false);
+    socket.destroy();
+  });
+});
+
+describe('Gateway01', () => {
+  it('drives the indicator light switch', async () => {
+    const device = baseDevice({
+      modelCode: 'gateway01',
+      devStateMap: { max_light: '1' },
+      groupInfoMap: {
+        light: enumGroup('light', 'max_light', [
+          ['1', '打开指示灯'],
+          ['0', '关闭指示灯'],
+        ]),
+      },
+    });
+    const { accessory, mutableDevice, platform, request } = createHarness(device);
+    const gateway = new Gateway01(platform, accessory);
+    const sw = await waitForService(accessory, Service.Switch);
+
+    expect(await sw.getCharacteristic(Characteristic.On).handleGetRequest()).toBe(true);
+    await sw.getCharacteristic(Characteristic.On).handleSetRequest(false);
+    expect(request.setDeviceState).toHaveBeenLastCalledWith(device.devUuid, 'light_0', '0');
+    expect(mutableDevice.devStateMap.max_light).toBe('0');
+    gateway.destroy();
+  });
+});
+
+describe('Smokealarm01', () => {
+  it('maps alarm, fault and battery state as read-only sensors', async () => {
+    const device = baseDevice({
+      modelCode: 'smokealarm01',
+      devStateMap: {
+        E321V040228_alarmed: '1',
+        E321V040228_trouble_change: '0',
+        yg_low_battery_change: '1',
+        wsdl_smokealarm_batterystate: '99',
+      },
+      groupInfoMap: {},
+    });
+    const { accessory, platform, request } = createHarness(device);
+    const smoke = new Smokealarm01(platform, accessory);
+    const sensor = await waitForService(accessory, Service.SmokeSensor);
+    const battery = await waitForService(accessory, Service.BatteryService);
+
+    expect(await sensor.getCharacteristic(Characteristic.SmokeDetected).handleGetRequest()).toBe(
+      Characteristic.SmokeDetected.SMOKE_DETECTED,
+    );
+    expect(await sensor.getCharacteristic(Characteristic.StatusFault).handleGetRequest()).toBe(0);
+    expect(await battery.getCharacteristic(Characteristic.BatteryLevel).handleGetRequest()).toBe(99);
+    expect(await battery.getCharacteristic(Characteristic.StatusLowBattery).handleGetRequest()).toBe(1);
+    expect(request.setDeviceState).not.toHaveBeenCalled();
+    smoke.destroy();
+  });
+});
+
+describe('Fullscreen', () => {
+  const toggleGroup = (code: string, state: string): ZiroomGroupInfo => ({
+    groupName: code,
+    groupType: 1,
+    isAggregate: 0,
+    groupCode: code,
+    devElementList: [
+      {
+        prodOperCode: `${code}_on`,
+        prodStateName: code,
+        elementCode: `${code}_on`,
+        elementName: '开启',
+        prodStateCode: state,
+        elementType: 1,
+        value: '1',
+      },
+      {
+        prodOperCode: `${code}_off`,
+        prodStateName: code,
+        elementCode: `${code}_off`,
+        elementName: '关闭',
+        prodStateCode: state,
+        elementType: 2,
+        value: '0',
+      },
+    ],
+  });
+
+  it('creates a switch per on/off group and skips non-toggle groups', async () => {
+    const device = baseDevice({
+      modelCode: 'fullscreen',
+      devStateMap: { ZH_C0102_voice_switchstate: '1', ZH_C0102_pir_switchstate: '0' },
+      groupInfoMap: {
+        fullscreen_voice: { ...toggleGroup('fullscreen_voice', 'ZH_C0102_voice_switchstate'), groupName: '语音控制' },
+        fullscreen_pir: { ...toggleGroup('fullscreen_pir', 'ZH_C0102_pir_switchstate'), groupName: '人体感应亮屏' },
+        device_description: { groupName: '描述', groupType: 3, isAggregate: 0, groupCode: 'desc', devElementList: [] },
+        fullscreen_sleep_time: rangeGroup('fullscreen_sleep_time', 'ZH_C0102_lcd_sleep', 0, 86399),
+      },
+    });
+    const { accessory, mutableDevice, platform } = createHarness(device);
+    const fullscreen = new Fullscreen(platform, accessory);
+    await vi.waitFor(() => expect(accessory.services.filter((s) => s instanceof Service.Switch)).toHaveLength(2));
+
+    const voice = accessory.services.find((s) => s.displayName.endsWith('语音控制'));
+    expect(voice).toBeDefined();
+    expect(await voice?.getCharacteristic(Characteristic.On).handleGetRequest()).toBe(true);
+    await voice?.getCharacteristic(Characteristic.On).handleSetRequest(false);
+    expect(mutableDevice.devStateMap.ZH_C0102_voice_switchstate).toBe('0');
+    fullscreen.destroy();
+  });
+});
+
+describe('Toiletseat', () => {
+  it('registers an information-only accessory for devices with no capabilities', async () => {
+    const { accessory, platform, request } = createHarness(
+      baseDevice({ modelCode: 'toiletseat', devStateMap: {}, groupInfoMap: {} }),
+    );
+    new Toiletseat(platform, accessory);
+    await vi.waitFor(() => expect(request.getDeviceDetail).toHaveBeenCalled());
+    expect(accessory.services.every((s) => s instanceof Service.AccessoryInformation)).toBe(true);
   });
 });

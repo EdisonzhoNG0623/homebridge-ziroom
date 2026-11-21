@@ -1,5 +1,17 @@
 import type { API, Characteristic, DynamicPlatformPlugin, Logger, PlatformConfig, Service } from 'homebridge';
-import { Conditioner02, Curtain01, Light03, Light04 } from './accessories';
+import {
+  Conditioner02,
+  Curtain01,
+  Fullscreen,
+  Gasalarm01,
+  Gateway01,
+  Light03,
+  Light04,
+  Lock01,
+  Smokealarm01,
+  Socket02,
+  Toiletseat,
+} from './accessories';
 import type { BaseAccessory } from './accessories/base';
 import { ZiroomRequest, type ZiroomRequestOptions } from './request';
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings';
@@ -127,6 +139,20 @@ export class ZiroomHomebridgePlatform implements DynamicPlatformPlugin {
         return Conditioner02;
       case 'curtain01':
         return Curtain01;
+      case 'lock01':
+        return Lock01;
+      case 'socket02':
+        return Socket02;
+      case 'gateway01':
+        return Gateway01;
+      case 'smokealarm01':
+        return Smokealarm01;
+      case 'gasalarm01':
+        return Gasalarm01;
+      case 'fullscreen':
+        return Fullscreen;
+      case 'toiletseat':
+        return Toiletseat;
       default:
         return null;
     }

@@ -26,3 +26,8 @@ Updated: 2026-09-15
 ## 下一件
 
 若用户仍报「插件坏了」：在跑 Homebridge 的那台机上查日志/配对/token，不要在本仓重做 3.2.0 已落地的空调窗帘功能。功能补全任务已关闭。
+
+## PC 交接
+
+- Paseo 路径：`/mnt/Data/Users/Ai-Workspace/homebridge-ziroom`（对齐 `/opt/ai/projects/homebridge-ziroom`）。
+- 源码仍在 `/opt/ai/projects/homebridge-ziroom` 与 Gitea。
